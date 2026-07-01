@@ -88,7 +88,7 @@ iris extension      # 下载/管理 extension
 
 ### IM 平台（企微 / 飞书 / QQ / Telegram / 微信）
 
-各 IM 平台的 Slash 命令（`/new` `/clear` `/model` `/session` `/stop` `/flush` `/undo` `/redo` `/help` 等）大同小异，详见 [docs/platforms.md](docs/platforms.md)。
+IM 平台常见 Slash 命令包括 `/new` `/clear` `/status` `/model` `/session` `/stop` `/flush` `/undo` `/redo` `/help` 等，具体差异见 [docs/platforms.md](docs/platforms.md)。
 
 ### 后台模式与跨进程连接
 

@@ -303,6 +303,7 @@ Telegram 不再从 `src/platforms/registry.ts` 内置注册，而是由 `extensi
 |------|------|
 | `/new` | 新建对话（清空上下文） |
 | `/clear` | 清空当前对话历史 |
+| `/status` | 查看当前状态、模型与上下文用量 |
 | `/model` | 查看或切换模型 |
 | `/session` | 查看或切换历史会话 |
 | `/stop` | 中止当前 AI 回复 |
@@ -338,7 +339,7 @@ Lark 不再从 `src/platforms/registry.ts` 内置注册，而是由 `extensions/
 
 #### 飞书 Slash 指令
 
-与 Telegram 一致（`/new` `/clear` `/model` `/session` `/stop` `/flush` `/undo` `/redo` `/help`）。
+当前支持 `/new` `/clear` `/model` `/session` `/stop` `/flush` `/undo` `/redo` `/help`。
 
 #### 配置
 

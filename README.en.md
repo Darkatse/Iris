@@ -85,7 +85,7 @@ Configuration is written to `~/.iris/configs/` (can be overridden via `IRIS_DATA
 
 ### IM Platforms (WeCom / Lark / QQ / Telegram / WeChat)
 
-Slash commands across IM platforms (`/new`, `/clear`, `/model`, `/session`, `/stop`, `/flush`, `/undo`, `/redo`, `/help`, …) are largely identical. See [docs/platforms.md](docs/platforms.md) for details.
+Common IM platform slash commands include `/new`, `/clear`, `/status`, `/model`, `/session`, `/stop`, `/flush`, `/undo`, `/redo`, `/help`, and more. See [docs/platforms.md](docs/platforms.md) for platform-specific differences.
 
 ### Background Mode and Cross-process Attach
 

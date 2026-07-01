@@ -9842,6 +9842,7 @@ var import_grammy = __toESM(require_mod(), 1);
 var TELEGRAM_BOT_COMMANDS = [
   { command: "new", description: "新建对话（清空上下文）" },
   { command: "clear", description: "清空当前对话历史" },
+  { command: "status", description: "查看当前状态" },
   { command: "model", description: "查看或切换模型" },
   { command: "load", description: "加载历史对话" },
   { command: "session", description: "查看或切换历史会话（/load 的别名）" },
@@ -10465,6 +10466,118 @@ function assertRichMessageWithinLimit(markdown) {
   if (length > TELEGRAM_RICH_MESSAGE_MAX_CHARS) {
     throw new Error(`Telegram rich message 超过 ${TELEGRAM_RICH_MESSAGE_MAX_CHARS} 字符限制: ${length}`);
   }
+}
+
+// src/status.ts
+async function buildTelegramStatusSnapshot(input) {
+  const models = input.backend.listModels();
+  const model = input.backend.getCurrentModelInfo?.() ?? models.find((item) => item.current) ?? models[0];
+  if (!model)
+    throw new Error("当前模型信息不可用");
+  const history = await input.backend.getHistory?.(input.sessionId) ?? [];
+  const tools = input.backend.getToolNames?.() ?? [];
+  const disabledTools = input.backend.getDisabledTools?.() ?? [];
+  const currentMode = input.backend.listModes?.().find((mode) => mode.current)?.name ?? "normal";
+  return {
+    agentName: input.agentName ?? "master",
+    sessionId: input.sessionId,
+    state: input.busy ? "busy" : "idle",
+    pendingMessages: input.pendingMessages,
+    modeName: currentMode,
+    model,
+    usage: findLatestUsage(history),
+    streamEnabled: input.backend.isStreamEnabled(),
+    toolCount: tools.length,
+    disabledToolCount: disabledTools.length,
+    runningTaskCount: input.backend.getRunningAgentTasks?.(input.sessionId).length ?? 0
+  };
+}
+function formatTelegramStatusText(status) {
+  const lines = [
+    "\uD83D\uDCCA 当前状态",
+    "",
+    `智能体: ${status.agentName}`,
+    `会话: ${status.sessionId}`,
+    `状态: ${formatState(status.state)}`,
+    `排队消息: ${formatNumber(status.pendingMessages)}`,
+    `模式: ${status.modeName}`,
+    `模型: ${status.model.modelName} → ${status.model.modelId}`,
+    ...status.model.provider ? [`提供商: ${status.model.provider}`] : [],
+    `上下文: ${formatContextUsage(status)}`,
+    `Token: ${formatTokenBreakdown(status.usage)}`,
+    `流式输出: ${formatStream(status.streamEnabled)}`,
+    `工具: ${formatToolCounts(status)}`,
+    `后台任务: ${formatNumber(status.runningTaskCount)}`
+  ];
+  return lines.join(`
+`);
+}
+function formatTelegramStatusMarkdown(status) {
+  const rows = [
+    ["智能体", status.agentName],
+    ["会话", status.sessionId],
+    ["状态", formatState(status.state)],
+    ["排队消息", formatNumber(status.pendingMessages)],
+    ["模式", status.modeName],
+    ["模型", `${status.model.modelName} → ${status.model.modelId}`],
+    ...status.model.provider ? [["提供商", status.model.provider]] : [],
+    ["上下文", formatContextUsage(status)],
+    ["Token", formatTokenBreakdown(status.usage)],
+    ["流式输出", formatStream(status.streamEnabled)],
+    ["工具", formatToolCounts(status)],
+    ["后台任务", formatNumber(status.runningTaskCount)]
+  ];
+  return [
+    "**\uD83D\uDCCA 当前状态**",
+    "",
+    "| 项目 | 值 |",
+    "| --- | --- |",
+    ...rows.map(([key, value]) => `| ${key} | ${codeCell(value)} |`)
+  ].join(`
+`);
+}
+function findLatestUsage(history) {
+  for (let i = history.length - 1;i >= 0; i -= 1) {
+    const usage = history[i]?.usageMetadata;
+    if (usage?.totalTokenCount != null)
+      return usage;
+  }
+  return;
+}
+function formatContextUsage(status) {
+  const total = status.usage?.totalTokenCount;
+  const window2 = status.model.contextWindow;
+  if (total == null)
+    return window2 ? `- / ${formatNumber(window2)}` : "-";
+  if (!window2)
+    return formatNumber(total);
+  return `${formatNumber(total)} / ${formatNumber(window2)} (${Math.round(total / window2 * 100)}%)`;
+}
+function formatTokenBreakdown(usage) {
+  if (!usage)
+    return "-";
+  const parts = [
+    usage.promptTokenCount != null ? `输入 ${formatNumber(usage.promptTokenCount)}` : "",
+    usage.cachedContentTokenCount != null ? `缓存 ${formatNumber(usage.cachedContentTokenCount)}` : "",
+    usage.candidatesTokenCount != null ? `输出 ${formatNumber(usage.candidatesTokenCount)}` : ""
+  ].filter(Boolean);
+  return parts.join("，") || "-";
+}
+function formatState(state) {
+  return state === "busy" ? "忙碌" : "空闲";
+}
+function formatStream(enabled) {
+  return enabled ? "开启" : "关闭";
+}
+function formatToolCounts(status) {
+  const enabled = Math.max(0, status.toolCount - status.disabledToolCount);
+  return `启用 ${formatNumber(enabled)} 个，禁用 ${formatNumber(status.disabledToolCount)} 个`;
+}
+function formatNumber(value) {
+  return value.toLocaleString("en-US");
+}
+function codeCell(value) {
+  return `\`${value.replace(/`/g, "'").replace(/\|/g, "\\|")}\``;
 }
 
 // src/turn-trace.ts
@@ -11254,6 +11367,26 @@ ${preview}`;
       this.trackBotMessageGroup(cs, [msgId]);
     }
   }
+  async sendStatusToChat(cs) {
+    const status = await buildTelegramStatusSnapshot({
+      backend: this.backend,
+      sessionId: cs.sessionId,
+      agentName: this.api?.agentName,
+      busy: cs.busy,
+      pendingMessages: cs.pendingMessages.length
+    });
+    const text = formatTelegramStatusText(status);
+    if (this.outputFormat !== "rich") {
+      await this.sendToChat(cs, text, { trackMessage: false });
+      return;
+    }
+    try {
+      await this.client.sendRichMessageReturningId(cs.target, renderTelegramRichTurn({ answerMarkdown: formatTelegramStatusMarkdown(status) }));
+    } catch (err) {
+      logger5.warn(`Telegram 状态 Rich Message 投递失败，回落为纯文本: ${formatTelegramErrorSummary(err)}`);
+      await this.sendToChat(cs, text, { trackMessage: false });
+    }
+  }
   async sendAssistantFinal(cs, text) {
     await this.deliverAssistantFinal(cs, text);
   }
@@ -11523,7 +11656,7 @@ ${content}`;
     if (!cmd)
       return false;
     const reply = (content) => this.sendToChat(cs, content, { trackMessage: false });
-    if (cs.busy && cmd.name !== "stop" && cmd.name !== "flush" && cmd.name !== "help") {
+    if (cs.busy && cmd.name !== "stop" && cmd.name !== "flush" && cmd.name !== "help" && cmd.name !== "status") {
       await reply(BUSY_COMMAND_NOTICE);
       return true;
     }
@@ -11537,6 +11670,14 @@ ${content}`;
       case "clear": {
         await this.backend.clearSession(cs.sessionId);
         await reply("✅ 当前对话历史已清空。");
+        return true;
+      }
+      case "status": {
+        try {
+          await this.sendStatusToChat(cs);
+        } catch (err) {
+          await reply(`❌ 获取状态失败: ${formatTelegramErrorSummary(err)}`);
+        }
         return true;
       }
       case "model":

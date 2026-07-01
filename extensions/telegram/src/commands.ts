@@ -15,6 +15,7 @@ export interface ParsedTelegramCommand {
 export const TELEGRAM_BOT_COMMANDS = [
   { command: 'new', description: '新建对话（清空上下文）' },
   { command: 'clear', description: '清空当前对话历史' },
+  { command: 'status', description: '查看当前状态' },
   { command: 'model', description: '查看或切换模型' },
   // [统一] 将 /session 功能也暴露为 /load，与 console 平台保持一致
   { command: 'load', description: '加载历史对话' },

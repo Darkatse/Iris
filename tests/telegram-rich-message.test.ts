@@ -339,6 +339,52 @@ describe('Telegram platform rich output', () => {
     }
   });
 
+  it('/status 在 rich 模式发送 Rich Message，且不进入 Backend chat', async () => {
+    const backend = new FakeBackend(false) as any;
+    const model = {
+      modelName: 'gpt_main',
+      modelId: 'gpt-5.4',
+      provider: 'openai-responses',
+      contextWindow: 128000,
+      current: true,
+    };
+    backend.listModels = () => [model];
+    backend.getCurrentModelInfo = () => model;
+    backend.getHistory = async () => [{
+      role: 'model',
+      parts: [],
+      usageMetadata: { promptTokenCount: 900, candidatesTokenCount: 300, totalTokenCount: 1200 },
+    }];
+    backend.getToolNames = () => ['read_file', 'shell'];
+    backend.getDisabledTools = () => [];
+    backend.getRunningAgentTasks = () => [];
+    backend.listModes = () => [{ name: 'code', current: true }];
+
+    const platform = new TelegramPlatform(backend, {
+      token: 'bot-token',
+      groupMentionRequired: false,
+      outputFormat: 'rich',
+    });
+
+    const sendRichMessageReturningId = vi.fn(async () => 44);
+    (platform as any).client = {
+      sendRichMessageReturningId,
+      sendMessageReturningId: vi.fn(async () => 999),
+    };
+
+    await (platform as any).handleMessage({
+      chat: { id: 1005, type: 'private' },
+      me: { username: 'iris_bot' },
+      message: { message_id: 5, text: '/status' },
+    });
+
+    expect(backend.chats).toHaveLength(0);
+    expect(sendRichMessageReturningId).toHaveBeenCalledOnce();
+    const rich = mockCallArg<RichPayload>(sendRichMessageReturningId, 0, 1);
+    expect(rich.markdown).toContain('**📊 当前状态**');
+    expect(rich.markdown).toContain('| 上下文 | `1,200 / 128,000 (1%)` |');
+  });
+
   it('非流式回复发送 rich message，trace 在正文前', async () => {
     const backend = new FakeBackend(false);
     const platform = new TelegramPlatform(backend as any, {

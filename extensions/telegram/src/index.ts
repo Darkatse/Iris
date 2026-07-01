@@ -33,6 +33,7 @@ import { TelegramMediaService } from './media';
 import { TelegramMessageBuilder, formatTelegramToolLine } from './message-builder';
 import { TelegramMessageHandler } from './message-handler';
 import { renderTelegramDraftTurn, renderTelegramRichTurn, type TelegramTraceSection } from './rich-message';
+import { buildTelegramStatusSnapshot, formatTelegramStatusMarkdown, formatTelegramStatusText } from './status';
 import { TelegramTurnTraceCollector } from './turn-trace';
 import {
   ParsedTelegramMessage,
@@ -746,6 +747,40 @@ export class TelegramPlatform extends PlatformAdapter {
     }
   }
 
+  /**
+   * 发送当前聊天的状态面板。
+   *
+   * /status 是只读平台命令，不调用 Backend.chat()，也不进入 bot 消息组栈；
+   * 这样它不会污染对话历史，也不会被 /undo 当成上一轮 AI 回复处理。
+   */
+  private async sendStatusToChat(cs: TelegramChatState): Promise<void> {
+    const status = await buildTelegramStatusSnapshot({
+      backend: this.backend,
+      sessionId: cs.sessionId,
+      agentName: this.api?.agentName,
+      busy: cs.busy,
+      pendingMessages: cs.pendingMessages.length,
+    });
+
+    const text = formatTelegramStatusText(status);
+    if (this.outputFormat !== 'rich') {
+      await this.sendToChat(cs, text, { trackMessage: false });
+      return;
+    }
+
+    try {
+      // 复用统一 Rich Message renderer，避免 /status 自己维护一套 Telegram payload 结构。
+      await this.client.sendRichMessageReturningId(
+        cs.target,
+        renderTelegramRichTurn({ answerMarkdown: formatTelegramStatusMarkdown(status) }),
+      );
+    } catch (err) {
+      // 状态面板是诊断入口，Rich Message 不可用时仍应给用户一个可读的纯文本结果。
+      logger.warn(`Telegram 状态 Rich Message 投递失败，回落为纯文本: ${formatTelegramErrorSummary(err)}`);
+      await this.sendToChat(cs, text, { trackMessage: false });
+    }
+  }
+
   private async sendAssistantFinal(cs: TelegramChatState, text: string): Promise<void> {
     await this.deliverAssistantFinal(cs, text);
   }
@@ -1091,7 +1126,7 @@ export class TelegramPlatform extends PlatformAdapter {
     if (!cmd) return false;
 
     const reply = (content: string) => this.sendToChat(cs, content, { trackMessage: false });
-    if (cs.busy && cmd.name !== 'stop' && cmd.name !== 'flush' && cmd.name !== 'help') {
+    if (cs.busy && cmd.name !== 'stop' && cmd.name !== 'flush' && cmd.name !== 'help' && cmd.name !== 'status') {
       // Telegram 现在会在长回合中继续接收命令；busy 期间只放行不会改变 turn 身份的命令。
       await reply(BUSY_COMMAND_NOTICE);
       return true;
@@ -1108,6 +1143,15 @@ export class TelegramPlatform extends PlatformAdapter {
       case 'clear': {
         await this.backend.clearSession(cs.sessionId);
         await reply('✅ 当前对话历史已清空。');
+        return true;
+      }
+
+      case 'status': {
+        try {
+          await this.sendStatusToChat(cs);
+        } catch (err) {
+          await reply(`❌ 获取状态失败: ${formatTelegramErrorSummary(err)}`);
+        }
         return true;
       }
 
