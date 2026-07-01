@@ -294,6 +294,7 @@ Telegram 不再从 `src/platforms/registry.ts` 内置注册，而是由 `extensi
 | 消息缓冲 | AI 输出期间用户新消息暂存到缓冲区，完成后自动合并发送 |
 | 工具审批 | 自动批准所有工具调用 |
 | 图片输入 | 支持图片/文件/语音消息解析并传入 Backend |
+| 附件输出 | 支持工具附件旁路投递图片、音频和文件；提供 `telegram_send_file` 发送本地文件到当前 Telegram 对话 |
 | 消息去重 | 跳过重复 update，丢弃 30s 前的过期消息 |
 | 撤销重做 | 接入 Backend undo('last-turn') 与 redo()，精准恢复，无孤立 functionCall 风险 |
 

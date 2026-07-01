@@ -8850,6 +8850,10 @@ var require_mod = __commonJS((exports) => {
   } });
 });
 
+// src/index.ts
+import { readFileSync, statSync } from "node:fs";
+import { basename as basename2, resolve } from "node:path";
+
 // ../../packages/extension-sdk/src/pairing/code-gen.ts
 import { randomInt } from "node:crypto";
 var CHARSET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -10220,6 +10224,12 @@ function guessMimeByFileName(fileName) {
     html: "text/html",
     md: "text/markdown",
     zip: "application/zip",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
     ogg: "audio/ogg",
     opus: "audio/opus",
     mp3: "audio/mpeg",
@@ -10982,21 +10992,13 @@ ${preview}`;
       },
       sendAttachment: async ({ target, attachment, caption, sessionId }) => {
         const telegramTarget = this.resolveDeliveryTarget(target, sessionId);
-        const fileName = attachment.fileName ?? attachment.filename;
-        const finalCaption = caption ?? attachment.caption;
-        let messageId;
-        const attachmentType = String(attachment.type ?? "").toLowerCase();
-        const mimeType = String(attachment.mimeType ?? "").toLowerCase();
-        if (attachmentType === "image" || mimeType.startsWith("image/")) {
-          messageId = await this.client.sendPhoto(telegramTarget, attachment.data, finalCaption);
-        } else if (attachmentType === "voice" || mimeType.includes("ogg")) {
-          messageId = await this.client.sendVoice(telegramTarget, attachment.data, fileName, finalCaption);
-        } else if (attachmentType === "audio" || mimeType.startsWith("audio/")) {
-          messageId = await this.client.sendAudio(telegramTarget, attachment.data, fileName, finalCaption);
-        } else {
-          messageId = await this.client.sendDocument(telegramTarget, attachment.data, fileName, finalCaption);
-        }
-        return { ok: true, platform: "telegram", messageId: String(messageId), raw: { target: telegramTarget } };
+        const messageId = await this.sendTelegramAttachment(telegramTarget, attachment, caption);
+        return {
+          ok: true,
+          platform: "telegram",
+          messageId: String(messageId),
+          raw: { target: telegramTarget }
+        };
       }
     };
     this.deliveryProviderDisposable = registry.registerProvider(provider);
@@ -11017,6 +11019,90 @@ ${preview}`;
       throw new Error(`Telegram delivery target.threadId 无效: ${target.threadId}`);
     }
     return buildTelegramSessionTarget({ chatId, isPrivate: target.kind === "user", threadId });
+  }
+  async sendTelegramAttachment(target, attachment, caption) {
+    const fileName = attachment.fileName ?? attachment.filename;
+    const finalCaption = caption ?? attachment.caption;
+    const attachmentType = String(attachment.type ?? "").toLowerCase();
+    const mimeType = String(attachment.mimeType ?? "").toLowerCase();
+    if (attachmentType === "image" || mimeType.startsWith("image/")) {
+      return this.client.sendPhoto(target, attachment.data, finalCaption);
+    }
+    if (attachmentType === "voice" || mimeType.includes("ogg")) {
+      return this.client.sendVoice(target, attachment.data, fileName, finalCaption);
+    }
+    if (attachmentType === "audio" || mimeType.startsWith("audio/")) {
+      return this.client.sendAudio(target, attachment.data, fileName, finalCaption);
+    }
+    return this.client.sendDocument(target, attachment.data, fileName, finalCaption);
+  }
+  createTelegramTools() {
+    return [
+      {
+        declaration: {
+          name: "telegram_send_file",
+          description: "发送本地文件到当前 Telegram 对话。可用于向用户展示截图、图片、音频、文档或日志。",
+          parameters: {
+            type: "object",
+            properties: {
+              file_path: {
+                type: "string",
+                description: "要发送的文件路径（绝对路径或相对当前工作目录的路径）"
+              },
+              message: {
+                type: "string",
+                description: "随文件一起发送的说明文字（可选）"
+              }
+            },
+            required: ["file_path"]
+          }
+        },
+        handler: async (args, context) => this.executeSendFile(args, context?.sessionId)
+      }
+    ];
+  }
+  async executeSendFile(args, sessionId) {
+    const filePath = typeof args.file_path === "string" ? args.file_path.trim() : "";
+    if (!filePath)
+      throw new Error("缺少 file_path 参数");
+    const sid = sessionId ?? this.backend.getActiveSessionId?.();
+    const cs = sid ? this.findChatStateBySid(sid) : undefined;
+    if (!cs || cs.stopped) {
+      throw new Error("当前不在 Telegram 会话中");
+    }
+    const resolved = this.resolveLocalFilePath(filePath);
+    let size;
+    try {
+      const stat = statSync(resolved);
+      if (!stat.isFile())
+        throw new Error(`路径不是文件: ${filePath}`);
+      size = stat.size;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("路径不是文件:"))
+        throw err;
+      throw new Error(`文件不存在: ${filePath}`);
+    }
+    const data = readFileSync(resolved);
+    const fileName = basename2(resolved);
+    const mimeType = guessMimeByFileName(fileName);
+    const caption = typeof args.message === "string" && args.message.trim() ? args.message.trim() : undefined;
+    const messageId = await this.sendTelegramAttachment(cs.target, {
+      type: mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : "file",
+      mimeType,
+      data,
+      fileName,
+      caption
+    });
+    return {
+      success: true,
+      fileName,
+      fileSize: size,
+      messageId: String(messageId)
+    };
+  }
+  resolveLocalFilePath(filePath) {
+    const cwd = this.backend.getCwd?.() ?? process.cwd();
+    return resolve(cwd, filePath);
   }
   getSessionId(chatKey) {
     let sid = this.activeSessions.get(chatKey);
@@ -11098,20 +11184,15 @@ ${preview}`;
     });
     this.backend.on("attachments", (sid, attachments) => {
       const cs = this.findChatStateBySid(sid);
-      logger5.info(`[attachments] 收到附件事件: sid=${sid}, count=${attachments.length}, cs=${!!cs}, stopped=${cs?.stopped}`);
-      if (!cs || cs.stopped || attachments.length === 0) {
-        logger5.info(`[attachments] 跳过: cs=${!!cs}, stopped=${cs?.stopped}, count=${attachments.length}`);
+      if (!cs || cs.stopped || attachments.length === 0)
         return;
-      }
       (async () => {
         for (const att of attachments) {
-          if (att.type !== "image")
-            continue;
           try {
-            logger5.info(`[attachments] 正在发送图片到 Telegram: chatId=${cs.target.chatId}, dataSize=${att.data.length}`);
-            await this.client.sendPhoto(cs.target, att.data, att.caption);
+            await this.sendTelegramAttachment(cs.target, att);
           } catch (err) {
-            logger5.error("发送图片失败:", err);
+            logger5.error("发送 Telegram 附件失败:", err);
+            await this.sendToChat(cs, `❌ 附件发送失败: ${formatTelegramErrorSummary(err)}`, { trackMessage: false }).catch(() => {});
           }
         }
       })();
@@ -12044,7 +12125,12 @@ var createTelegramPlatform = definePlatformFactory({
     pairing: raw.pairing,
     eventBus: context.eventBus
   }),
-  create: (backend, config, context) => new TelegramPlatform(backend, config, context.api)
+  create: (backend, config, context) => {
+    const platform = new TelegramPlatform(backend, config, context.api);
+    const api = context.api;
+    api?.tools?.registerAll(platform.createTelegramTools());
+    return platform;
+  }
 });
 var src_default = createTelegramPlatform;
 export {

@@ -7,6 +7,8 @@
  *   - Backend 历史保持平台无关，Telegram rich / trace 只存在于平台渲染层。
  */
 
+import { readFileSync, statSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
 import { PairingGuard, PairingStore } from 'irises-extension-sdk/pairing';
 import {
   DELIVERY_REGISTRY_SERVICE_ID,
@@ -25,11 +27,12 @@ import {
   type Part,
   type PlatformDeliveryProvider,
   type ToolAttachment,
+  type ToolDefinition,
   type ToolExecutionHandleLike,
 } from 'irises-extension-sdk';
 import { TelegramClient } from './client';
 import { TelegramCommandRouter } from './commands';
-import { TelegramMediaService } from './media';
+import { TelegramMediaService, guessMimeByFileName } from './media';
 import { TelegramMessageBuilder, formatTelegramToolLine } from './message-builder';
 import { TelegramMessageHandler } from './message-handler';
 import { renderTelegramDraftTurn, renderTelegramRichTurn, type TelegramTraceSection } from './rich-message';
@@ -276,21 +279,13 @@ export class TelegramPlatform extends PlatformAdapter {
       },
       sendAttachment: async ({ target, attachment, caption, sessionId }) => {
         const telegramTarget = this.resolveDeliveryTarget(target, sessionId);
-        const fileName = attachment.fileName ?? attachment.filename;
-        const finalCaption = caption ?? attachment.caption;
-        let messageId: number;
-        const attachmentType = String(attachment.type ?? '').toLowerCase();
-        const mimeType = String(attachment.mimeType ?? '').toLowerCase();
-        if (attachmentType === 'image' || mimeType.startsWith('image/')) {
-          messageId = await this.client.sendPhoto(telegramTarget, attachment.data, finalCaption);
-        } else if (attachmentType === 'voice' || mimeType.includes('ogg')) {
-          messageId = await this.client.sendVoice(telegramTarget, attachment.data, fileName, finalCaption);
-        } else if (attachmentType === 'audio' || mimeType.startsWith('audio/')) {
-          messageId = await this.client.sendAudio(telegramTarget, attachment.data, fileName, finalCaption);
-        } else {
-          messageId = await this.client.sendDocument(telegramTarget, attachment.data, fileName, finalCaption);
-        }
-        return { ok: true, platform: 'telegram', messageId: String(messageId), raw: { target: telegramTarget } };
+        const messageId = await this.sendTelegramAttachment(telegramTarget, attachment, caption);
+        return {
+          ok: true,
+          platform: 'telegram',
+          messageId: String(messageId),
+          raw: { target: telegramTarget },
+        };
       },
     };
 
@@ -315,6 +310,113 @@ export class TelegramPlatform extends PlatformAdapter {
       throw new Error(`Telegram delivery target.threadId 无效: ${target.threadId}`);
     }
     return buildTelegramSessionTarget({ chatId, isPrivate: target.kind === 'user', threadId });
+  }
+
+  /**
+   * Telegram 出站附件的唯一分派点。
+   *
+   * delivery provider、Backend attachments 事件和 telegram_send_file 都走这里，
+   * 避免三条入口各自维护一套 Bot API 类型判断。
+   */
+  private async sendTelegramAttachment(
+    target: TelegramSessionTarget,
+    attachment: ToolAttachment,
+    caption?: string,
+  ): Promise<number> {
+    const fileName = attachment.fileName ?? attachment.filename;
+    const finalCaption = caption ?? attachment.caption;
+    const attachmentType = String(attachment.type ?? '').toLowerCase();
+    const mimeType = String(attachment.mimeType ?? '').toLowerCase();
+
+    if (attachmentType === 'image' || mimeType.startsWith('image/')) {
+      return this.client.sendPhoto(target, attachment.data, finalCaption);
+    }
+    if (attachmentType === 'voice' || mimeType.includes('ogg')) {
+      return this.client.sendVoice(target, attachment.data, fileName, finalCaption);
+    }
+    if (attachmentType === 'audio' || mimeType.startsWith('audio/')) {
+      return this.client.sendAudio(target, attachment.data, fileName, finalCaption);
+    }
+    return this.client.sendDocument(target, attachment.data, fileName, finalCaption);
+  }
+
+  /** 创建 Telegram 专属 LLM 工具定义。 */
+  createTelegramTools(): ToolDefinition[] {
+    return [
+      {
+        declaration: {
+          name: 'telegram_send_file',
+          description: '发送本地文件到当前 Telegram 对话。可用于向用户展示截图、图片、音频、文档或日志。',
+          parameters: {
+            type: 'object',
+            properties: {
+              file_path: {
+                type: 'string',
+                description: '要发送的文件路径（绝对路径或相对当前工作目录的路径）',
+              },
+              message: {
+                type: 'string',
+                description: '随文件一起发送的说明文字（可选）',
+              },
+            },
+            required: ['file_path'],
+          },
+        },
+        handler: async (args, context) => this.executeSendFile(args, context?.sessionId),
+      },
+    ];
+  }
+
+  /**
+   * telegram_send_file 的执行逻辑。
+   *
+   * 这里只把本地文件读成 ToolAttachment，目标会话校验和实际投递复用平台附件链路。
+   */
+  private async executeSendFile(args: Record<string, unknown>, sessionId?: string): Promise<unknown> {
+    const filePath = typeof args.file_path === 'string' ? args.file_path.trim() : '';
+    if (!filePath) throw new Error('缺少 file_path 参数');
+
+    const sid = sessionId ?? this.backend.getActiveSessionId?.();
+    const cs = sid ? this.findChatStateBySid(sid) : undefined;
+    if (!cs || cs.stopped) {
+      throw new Error('当前不在 Telegram 会话中');
+    }
+
+    const resolved = this.resolveLocalFilePath(filePath);
+    let size: number;
+    try {
+      const stat = statSync(resolved);
+      if (!stat.isFile()) throw new Error(`路径不是文件: ${filePath}`);
+      size = stat.size;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('路径不是文件:')) throw err;
+      throw new Error(`文件不存在: ${filePath}`);
+    }
+
+    const data = readFileSync(resolved);
+    const fileName = basename(resolved);
+    const mimeType = guessMimeByFileName(fileName);
+    const caption = typeof args.message === 'string' && args.message.trim() ? args.message.trim() : undefined;
+    const messageId = await this.sendTelegramAttachment(cs.target, {
+      type: mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('audio/') ? 'audio' : 'file',
+      mimeType,
+      data,
+      fileName,
+      caption,
+    });
+
+    return {
+      success: true,
+      fileName,
+      fileSize: size,
+      messageId: String(messageId),
+    };
+  }
+
+  private resolveLocalFilePath(filePath: string): string {
+    // 相对路径按当前 Backend cwd 解析，使工具行为跟当前对话工作目录保持一致。
+    const cwd = (this.backend as IrisBackendLike & { getCwd?: () => string }).getCwd?.() ?? process.cwd();
+    return resolve(cwd, filePath);
   }
 
   // ---- Session 管理 ----
@@ -420,26 +522,19 @@ export class TelegramPlatform extends PlatformAdapter {
       });
     });
 
-    // ---- 工具附件（图片等） ----
+    // ---- 工具附件（图片、音频、文件等） ----
     this.backend.on('attachments', (sid: string, attachments: ToolAttachment[]) => {
       const cs = this.findChatStateBySid(sid);
-      // 调试日志：确认 attachments 事件是否到达 Telegram 平台层
-      logger.info(`[attachments] 收到附件事件: sid=${sid}, count=${attachments.length}, cs=${!!cs}, stopped=${cs?.stopped}`);
-      if (!cs || cs.stopped || attachments.length === 0) {
-        logger.info(`[attachments] 跳过: cs=${!!cs}, stopped=${cs?.stopped}, count=${attachments.length}`);
-        return;
-      }
+      if (!cs || cs.stopped || attachments.length === 0) return;
 
-      // 附件是平台级能力，不进入 LLM 上下文。
-      // 这里直接把图片发给用户，文本摘要仍会通过后续 response 事件送出。
+      // 附件是平台级旁路能力，不进入 LLM 上下文；文本摘要仍会通过后续 response 事件送出。
       void (async () => {
         for (const att of attachments) {
-          if (att.type !== 'image') continue;
           try {
-            logger.info(`[attachments] 正在发送图片到 Telegram: chatId=${cs.target.chatId}, dataSize=${att.data.length}`);
-            await this.client.sendPhoto(cs.target, att.data, att.caption);
+            await this.sendTelegramAttachment(cs.target, att);
           } catch (err) {
-            logger.error('发送图片失败:', err);
+            logger.error('发送 Telegram 附件失败:', err);
+            await this.sendToChat(cs, `❌ 附件发送失败: ${formatTelegramErrorSummary(err)}`, { trackMessage: false }).catch(() => {});
           }
         }
       })();
@@ -1569,7 +1664,13 @@ export const createTelegramPlatform = definePlatformFactory<TelegramConfig, Tele
     // cron 通知已改走 backend agent:notification 事件，不再依赖 eventBus。
     eventBus: (context as any).eventBus,
   }),
-  create: (backend, config, context) => new TelegramPlatform(backend, config, context.api as IrisAPI | undefined),
+  create: (backend, config, context) => {
+    const platform = new TelegramPlatform(backend, config, context.api as IrisAPI | undefined);
+    // 某些宿主/测试上下文只提供 IrisAPI 子集；没有工具注册表时平台仍应正常启动。
+    const api = context.api as { tools?: { registerAll(tools: ToolDefinition[]): void } } | undefined;
+    api?.tools?.registerAll(platform.createTelegramTools());
+    return platform;
+  },
 });
 
 export default createTelegramPlatform;

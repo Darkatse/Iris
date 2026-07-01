@@ -115,8 +115,8 @@ function detectImageMime(buffer: Buffer): string | null {
   return null;
 }
 
-/** 根据文件扩展名猜测 MIME 类型 */
-function guessMimeByFileName(fileName: string): string {
+/** 根据文件扩展名猜测 MIME 类型；未知扩展按普通二进制文件处理。 */
+export function guessMimeByFileName(fileName: string): string {
   const ext = fileName.split('.').pop()?.toLowerCase();
   const MIME_MAP: Record<string, string> = {
     pdf: 'application/pdf',
@@ -133,6 +133,12 @@ function guessMimeByFileName(fileName: string): string {
     html: 'text/html',
     md: 'text/markdown',
     zip: 'application/zip',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    bmp: 'image/bmp',
     ogg: 'audio/ogg',
     opus: 'audio/opus',
     mp3: 'audio/mpeg',
